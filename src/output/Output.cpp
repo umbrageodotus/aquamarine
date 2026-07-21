@@ -146,7 +146,12 @@ void Aquamarine::COutputState::setColorRange(eOutputColorRange range) {
     internalState.colorRange = range;
 }
 
+void Aquamarine::COutputState::setPresentationID(uint64_t id) {
+    internalState.presentationID = id;
+}
+
 void Aquamarine::COutputState::onCommit() {
-    internalState.committed = 0;
+    internalState.committed      = 0;
+    internalState.presentationID = 0;
     internalState.damage.clear();
 }

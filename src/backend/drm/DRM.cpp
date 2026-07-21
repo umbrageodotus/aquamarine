@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <system_error>
 #include <unordered_set>
+#include <utility>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -56,6 +57,18 @@ static bool shouldSubmitCTM(SP<SDRMConnector> connector, const COutputState::SIn
         return true;
 
     return connector->crtc->props.values.ctm && !connector->crtc->atomic.ctmStateKnown;
+}
+
+static void discardPendingPresentation(const SP<SDRMConnector>& connector) {
+    const uint64_t presentationID = std::exchange(connector->pendingPageFlip.presentationID, 0);
+    if (presentationID == 0 || !connector->output)
+        return;
+
+    connector->output->events.present.emit(IOutput::SPresentEvent{.presented = false, .presentationID = presentationID});
+}
+
+bool Aquamarine::SDRMPageFlip::zeroCopy() const {
+    return connector && !connector->backend->shouldBlit();
 }
 
 Aquamarine::CDRMBackend::CDRMBackend(SP<CBackend> backend_) : backend(backend_) {
@@ -410,6 +423,7 @@ void Aquamarine::CDRMBackend::restoreAfterVT() {
     for (auto const& c : connectors) {
         if (c->sched.frameInFlight() || c->sched.frameRunning()) {
             backend->log(AQ_LOG_DEBUG, std::format("drm: Clearing stale page-flip state for {}", c->szName));
+            discardPendingPresentation(c);
             c->sched.invalidate();
         }
     }
@@ -1162,6 +1176,8 @@ static void handlePF(int fd, unsigned seq, unsigned tv_sec, unsigned tv_usec, un
     if (!pageFlip || !pageFlip->connector)
         return;
 
+    const uint64_t presentationID = std::exchange(pageFlip->presentationID, 0);
+
     pageFlip->connector->sched.onFrameComplete();
 
     const auto& BACKEND = pageFlip->connector->backend;
@@ -1179,7 +1195,9 @@ static void handlePF(int fd, unsigned seq, unsigned tv_sec, unsigned tv_usec, un
 
     pageFlip->connector->onPresent();
 
-    uint32_t flags = IOutput::AQ_OUTPUT_PRESENT_VSYNC | IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK | IOutput::AQ_OUTPUT_PRESENT_HW_COMPLETION | IOutput::AQ_OUTPUT_PRESENT_ZEROCOPY;
+    uint32_t flags = IOutput::AQ_OUTPUT_PRESENT_VSYNC | IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK | IOutput::AQ_OUTPUT_PRESENT_HW_COMPLETION;
+    if (pageFlip->zeroCopy())
+        flags |= IOutput::AQ_OUTPUT_PRESENT_ZEROCOPY;
 
     timespec presented = {.tv_sec = (time_t)tv_sec, .tv_nsec = (long)(tv_usec * 1000)};
 
@@ -1190,11 +1208,12 @@ static void handlePF(int fd, unsigned seq, unsigned tv_sec, unsigned tv_usec, un
         flags &= ~IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK;
 
     pageFlip->connector->output->events.present.emit(IOutput::SPresentEvent{
-        .presented = BACKEND->sessionActive(),
-        .when      = &presented,
-        .seq       = seq,
-        .refresh   = (int)(pageFlip->connector->refresh ? (1000000000000LL / pageFlip->connector->refresh) : 0),
-        .flags     = flags,
+        .presented      = BACKEND->sessionActive(),
+        .when           = &presented,
+        .seq            = seq,
+        .refresh        = (int)(pageFlip->connector->refresh ? (1000000000000LL / pageFlip->connector->refresh) : 0),
+        .flags          = flags,
+        .presentationID = presentationID,
     });
 
     // Skip if an idle frame is already queued: it emits events.frame itself, and #325 forbids double-firing.
@@ -1816,7 +1835,8 @@ void Aquamarine::SDRMConnector::disconnect() {
         return;
     }
 
-    status = DRM_MODE_DISCONNECTED;
+    status                         = DRM_MODE_DISCONNECTED;
+    pendingPageFlip.presentationID = 0;
     releaseFBReferences();
 
     output->events.destroy.emit();
@@ -1854,6 +1874,7 @@ void Aquamarine::SDRMConnector::applyCommit(const SDRMConnectorCommitData& data)
 
     if (!output->enabledState) {
         releaseFBReferences();
+        discardPendingPresentation(self.lock());
         sched.invalidate();
     }
 
@@ -1905,6 +1926,7 @@ void Aquamarine::SDRMConnector::onPresent() {
 }
 
 Aquamarine::CDRMOutput::~CDRMOutput() {
+    connector->pendingPageFlip.presentationID = 0;
     if (backend && backend->backend)
         backend->backend->removeIdleEvent(frameIdle);
     connector->sched.onFrameComplete();
@@ -2026,6 +2048,7 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
             // ALLOW_MODESET resets the CRTC and cancels the in-flight flip; no
             // completion event will arrive, so clear the userspace state.
             backend->backend->log(AQ_LOG_DEBUG, std::format("drm: page-flip on {} cancelled by modeset, clearing flip state", name));
+            discardPendingPresentation(connector);
             connector->sched.invalidate();
         }
 
@@ -2207,6 +2230,11 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
     if (onlyTest || !ok)
         return ok;
 
+    const uint64_t presentationID = COMMITTED & COutputState::AQ_OUTPUT_STATE_BUFFER ? STATE.presentationID : 0;
+
+    if (data.flags & DRM_MODE_PAGE_FLIP_EVENT && !(data.flags & DRM_MODE_PAGE_FLIP_ASYNC))
+        connector->pendingPageFlip.presentationID = presentationID;
+
     events.commit.emit();
     state->onCommit();
 
@@ -2217,25 +2245,32 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
         connector->commitTainted = false;
 
     if (data.flags & DRM_MODE_PAGE_FLIP_ASYNC) {
+        connector->pendingPageFlip.presentationID = 0;
+
         // for tearing commits, we will send presentation feedback instantly, and rotate
         // drm framebuffers to properly send backendRelease events.
         // the last FB should already be gone from KMS because it's been immediately replaced
 
         // no completion and no vsync, because tearing
-        uint32_t flags = IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK | IOutput::AQ_OUTPUT_PRESENT_ZEROCOPY;
+        uint32_t flags = IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK;
+        if (!backend->shouldBlit())
+            flags |= IOutput::AQ_OUTPUT_PRESENT_ZEROCOPY;
 
         timespec presented;
         clock_gettime(CLOCK_MONOTONIC, &presented);
 
         connector->output->events.present.emit(IOutput::SPresentEvent{
-            .presented = backend->sessionActive(),
-            .when      = &presented,
-            .seq       = 0, /* unknown sequence for tearing */
-            .refresh   = (int)(connector->refresh ? (1000000000000LL / connector->refresh) : 0),
-            .flags     = flags,
+            .presented      = backend->sessionActive(),
+            .when           = &presented,
+            .seq            = 0, /* unknown sequence for tearing */
+            .refresh        = (int)(connector->refresh ? (1000000000000LL / connector->refresh) : 0),
+            .flags          = flags,
+            .presentationID = presentationID,
         });
 
         connector->onPresent();
+    } else if (presentationID != 0 && !(data.flags & DRM_MODE_PAGE_FLIP_EVENT)) {
+        connector->output->events.present.emit(IOutput::SPresentEvent{.presented = false, .presentationID = presentationID});
     }
 
     return ok;

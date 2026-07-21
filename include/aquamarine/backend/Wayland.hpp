@@ -71,6 +71,7 @@ namespace Aquamarine {
         Hyprutils::Signal::CHyprSignalListener                       frameReadyListener;
         Hyprutils::Signal::CHyprSignalListener                       rescheduleListener;
         Hyprutils::Memory::CSharedPointer<std::function<void(void)>> frameIdle;
+        uint64_t                                                     pendingPresentationID = 0;
 
         struct {
             std::vector<std::pair<Hyprutils::Memory::CWeakPointer<IBuffer>, Hyprutils::Memory::CSharedPointer<CWaylandBuffer>>> buffers;

@@ -149,6 +149,14 @@ add_test(
   COMMAND attachments "attachments")
 add_dependencies(tests attachments)
 
+add_executable(presentationIdentity "tests/PresentationIdentity.cpp")
+target_link_libraries(presentationIdentity PRIVATE PkgConfig::deps aquamarine)
+add_test(
+  NAME "presentationIdentity"
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests
+  COMMAND presentationIdentity)
+add_dependencies(tests presentationIdentity)
+
 # Installation
 install(TARGETS aquamarine)
 install(DIRECTORY "include/aquamarine" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})

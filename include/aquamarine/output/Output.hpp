@@ -84,8 +84,9 @@ namespace Aquamarine {
             Hyprutils::Math::Mat3x3                        ctm            = Hyprutils::Math::Mat3x3::identity();
             bool                                           wideColorGamut = false;
             hdr_output_metadata                            hdrMetadata;
-            uint16_t                                       contentType = DRM_MODE_CONTENT_TYPE_GRAPHICS;
-            eOutputColorRange                              colorRange  = AQ_OUTPUT_COLOR_RANGE_AUTO;
+            uint16_t                                       contentType    = DRM_MODE_CONTENT_TYPE_GRAPHICS;
+            eOutputColorRange                              colorRange     = AQ_OUTPUT_COLOR_RANGE_AUTO;
+            uint64_t                                       presentationID = 0;
         };
 
         const SInternalState& state();
@@ -109,6 +110,7 @@ namespace Aquamarine {
         void                  setHDRMetadata(const hdr_output_metadata& metadata);
         void                  setContentType(const uint16_t drmContentType);
         void                  setColorRange(eOutputColorRange range);
+        void                  setPresentationID(uint64_t id);
 
       private:
         SInternalState internalState;
@@ -211,11 +213,12 @@ namespace Aquamarine {
         };
 
         struct SPresentEvent {
-            bool         presented = true;
-            timespec*    when      = nullptr;
-            unsigned int seq       = 0;
-            int          refresh   = 0;
-            uint32_t     flags     = 0;
+            bool         presented      = true;
+            timespec*    when           = nullptr;
+            unsigned int seq            = 0;
+            int          refresh        = 0;
+            uint32_t     flags          = 0;
+            uint64_t     presentationID = 0;
         };
 
         struct {
