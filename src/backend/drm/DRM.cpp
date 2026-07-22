@@ -6,6 +6,7 @@
 #include <aquamarine/allocator/GBM.hpp>
 #include <aquamarine/allocator/DRMDumb.hpp>
 #include <cstdint>
+#include <cstdlib>
 #include <format>
 #include <hyprutils/math/Mat3x3.hpp>
 #include <hyprutils/string/VarList.hpp>
@@ -67,8 +68,98 @@ static void discardPendingPresentation(const SP<SDRMConnector>& connector) {
     connector->output->events.present.emit(IOutput::SPresentEvent{.presented = false, .presentationID = presentationID});
 }
 
+static constexpr int64_t NSEC_PER_SEC                   = 1'000'000'000;
+static constexpr int64_t CLOCK_EQUIVALENCE_THRESHOLD_NS = 1'000'000;
+static constexpr int64_t CLOCK_CLASSIFICATION_MARGIN_NS = 100'000;
+static constexpr uint8_t CLOCK_CLASSIFICATION_SAMPLES   = 3;
+
+static int64_t           timespecToNs(const timespec& timestamp) {
+    return timestamp.tv_sec * NSEC_PER_SEC + timestamp.tv_nsec;
+}
+
+static timespec nsToTimespec(int64_t timestamp) {
+    timespec result = {
+        .tv_sec  = timestamp / NSEC_PER_SEC,
+        .tv_nsec = timestamp % NSEC_PER_SEC,
+    };
+
+    if (result.tv_nsec < 0) {
+        result.tv_nsec += NSEC_PER_SEC;
+        --result.tv_sec;
+    }
+
+    return result;
+}
+
 bool Aquamarine::SDRMPageFlip::zeroCopy() const {
     return connector && !connector->backend->shouldBlit();
+}
+
+timespec Aquamarine::SDRMPageFlip::normalizeTimestamp(const timespec& timestamp, uint32_t& flags) const {
+    return connector->backend->normalizePresentationTimestamp(timestamp, flags);
+}
+
+Aquamarine::CDRMBackend::ePresentationClock Aquamarine::CDRMBackend::classifyPresentationClock(const timespec& timestamp, const timespec& monotonicNow,
+                                                                                               const timespec& monotonicRawNow) {
+    const int64_t timestampNs    = timespecToNs(timestamp);
+    const int64_t monotonicNs    = timespecToNs(monotonicNow);
+    const int64_t monotonicRawNs = timespecToNs(monotonicRawNow);
+    const int64_t clockDistance  = std::abs(monotonicNs - monotonicRawNs);
+
+    if (clockDistance <= CLOCK_EQUIVALENCE_THRESHOLD_NS)
+        return ePresentationClock::UNKNOWN;
+
+    const int64_t monotonicDistance    = std::abs(monotonicNs - timestampNs);
+    const int64_t monotonicRawDistance = std::abs(monotonicRawNs - timestampNs);
+
+    if (monotonicDistance + CLOCK_CLASSIFICATION_MARGIN_NS < monotonicRawDistance)
+        return ePresentationClock::MONOTONIC;
+    if (monotonicRawDistance + CLOCK_CLASSIFICATION_MARGIN_NS < monotonicDistance)
+        return ePresentationClock::MONOTONIC_RAW;
+
+    return ePresentationClock::UNKNOWN;
+}
+
+timespec Aquamarine::CDRMBackend::convertMonotonicRawToMonotonic(const timespec& timestamp, const timespec& monotonicNow, const timespec& monotonicRawNow) {
+    return nsToTimespec(timespecToNs(timestamp) + timespecToNs(monotonicNow) - timespecToNs(monotonicRawNow));
+}
+
+timespec Aquamarine::CDRMBackend::normalizePresentationTimestamp(const timespec& timestamp, uint32_t& flags) {
+    if (presentationClock.source == ePresentationClock::MONOTONIC)
+        return timestamp;
+
+    timespec monotonicNow = {}, monotonicRawNow = {};
+    clock_gettime(CLOCK_MONOTONIC, &monotonicNow);
+    clock_gettime(CLOCK_MONOTONIC_RAW, &monotonicRawNow);
+
+    if (presentationClock.source == ePresentationClock::MONOTONIC_RAW)
+        return convertMonotonicRawToMonotonic(timestamp, monotonicNow, monotonicRawNow);
+
+    const auto CANDIDATE = classifyPresentationClock(timestamp, monotonicNow, monotonicRawNow);
+    if (CANDIDATE == ePresentationClock::UNKNOWN) {
+        presentationClock.candidate        = ePresentationClock::UNKNOWN;
+        presentationClock.candidateSamples = 0;
+        flags &= ~IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK;
+        return monotonicNow;
+    }
+
+    if (presentationClock.candidate != CANDIDATE) {
+        presentationClock.candidate        = CANDIDATE;
+        presentationClock.candidateSamples = 1;
+    } else
+        presentationClock.candidateSamples++;
+
+    if (presentationClock.candidateSamples < CLOCK_CLASSIFICATION_SAMPLES) {
+        flags &= ~IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK;
+        return monotonicNow;
+    }
+
+    presentationClock.source = CANDIDATE;
+    log(CANDIDATE == ePresentationClock::MONOTONIC_RAW ? AQ_LOG_WARNING : AQ_LOG_DEBUG,
+        CANDIDATE == ePresentationClock::MONOTONIC_RAW ? "drm: Page-flip timestamps use CLOCK_MONOTONIC_RAW, normalizing to CLOCK_MONOTONIC" :
+                                                         "drm: Page-flip timestamps use CLOCK_MONOTONIC");
+
+    return CANDIDATE == ePresentationClock::MONOTONIC_RAW ? convertMonotonicRawToMonotonic(timestamp, monotonicNow, monotonicRawNow) : timestamp;
 }
 
 Aquamarine::CDRMBackend::CDRMBackend(SP<CBackend> backend_) : backend(backend_) {
@@ -1200,6 +1291,7 @@ static void handlePF(int fd, unsigned seq, unsigned tv_sec, unsigned tv_usec, un
         flags |= IOutput::AQ_OUTPUT_PRESENT_ZEROCOPY;
 
     timespec presented = {.tv_sec = (time_t)tv_sec, .tv_nsec = (long)(tv_usec * 1000)};
+    presented          = pageFlip->normalizeTimestamp(presented, flags);
 
     // nvidia-drm registers no vblank counter, unless module options 'nvidia_drm vblank=1' is set.
     // kernel checks for vblank support and fallbacks to setting seq 0 and the timestamp is a plain ktime_get()

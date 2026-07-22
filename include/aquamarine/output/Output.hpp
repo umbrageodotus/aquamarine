@@ -214,7 +214,7 @@ namespace Aquamarine {
 
         struct SPresentEvent {
             bool         presented      = true;
-            timespec*    when           = nullptr;
+            timespec*    when           = nullptr; // CLOCK_MONOTONIC, valid for the duration of the signal emission
             unsigned int seq            = 0;
             int          refresh        = 0;
             uint32_t     flags          = 0;

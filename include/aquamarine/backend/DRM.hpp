@@ -257,6 +257,7 @@ namespace Aquamarine {
         uint64_t                                       presentationID = 0;
 
         bool                                           zeroCopy() const;
+        timespec                                       normalizeTimestamp(const timespec& timestamp, uint32_t& flags) const;
     };
 
     struct SDRMConnectorCommitData {
@@ -462,7 +463,23 @@ namespace Aquamarine {
         void markRedundantTiles();
         void buildGlFormats(const std::vector<SGLFormat>& fmts);
 
-        Hyprutils::Memory::CSharedPointer<CSessionDevice>     gpu;
+        enum class ePresentationClock : uint8_t {
+            UNKNOWN = 0,
+            MONOTONIC,
+            MONOTONIC_RAW,
+        };
+
+        struct SPresentationClockState {
+            ePresentationClock source           = ePresentationClock::UNKNOWN;
+            ePresentationClock candidate        = ePresentationClock::UNKNOWN;
+            uint8_t            candidateSamples = 0;
+        };
+
+        static ePresentationClock                         classifyPresentationClock(const timespec& timestamp, const timespec& monotonicNow, const timespec& monotonicRawNow);
+        static timespec                                   convertMonotonicRawToMonotonic(const timespec& timestamp, const timespec& monotonicNow, const timespec& monotonicRawNow);
+        timespec                                          normalizePresentationTimestamp(const timespec& timestamp, uint32_t& flags);
+
+        Hyprutils::Memory::CSharedPointer<CSessionDevice> gpu;
         Hyprutils::Memory::CSharedPointer<IDRMImplementation> impl;
         Hyprutils::Memory::CWeakPointer<CDRMBackend>          primary;
 
@@ -485,6 +502,7 @@ namespace Aquamarine {
         Hyprutils::Memory::CSharedPointer<CDRMDumbAllocator>          dumbAllocator;
 
         bool                                                          atomic = false;
+        SPresentationClockState                                       presentationClock;
 
         struct {
             Hyprutils::Math::Vector2D cursorSize;
@@ -507,6 +525,7 @@ namespace Aquamarine {
         friend struct SDRMPlane;
         friend class CDRMOutput;
         friend struct SDRMPageFlip;
+        friend class CPresentationClockTestAccess;
         friend class CDRMLegacyImpl;
         friend class CDRMAtomicImpl;
         friend class CDRMAtomicRequest;

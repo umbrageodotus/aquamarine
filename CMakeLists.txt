@@ -157,6 +157,14 @@ add_test(
   COMMAND presentationIdentity)
 add_dependencies(tests presentationIdentity)
 
+add_executable(presentationClock "tests/PresentationClock.cpp")
+target_link_libraries(presentationClock PRIVATE PkgConfig::deps aquamarine)
+add_test(
+  NAME "presentationClock"
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests
+  COMMAND presentationClock)
+add_dependencies(tests presentationClock)
+
 # Installation
 install(TARGETS aquamarine)
 install(DIRECTORY "include/aquamarine" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
