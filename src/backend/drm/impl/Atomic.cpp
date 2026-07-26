@@ -370,9 +370,22 @@ bool Aquamarine::CDRMAtomicRequest::commit(uint32_t flagssss) {
         return false;
     }
 
-    if (auto ret = drmModeAtomicCommit(backend->gpu->fd, req, flagssss, conn ? &conn->pendingPageFlip : nullptr); ret) {
+    int        ret   = drmModeAtomicCommit(backend->gpu->fd, req, flagssss, conn ? &conn->pendingPageFlip : nullptr);
+    int        error = ret == -1 ? errno : -ret;
+
+    const bool canRetryBlocking = error == EBUSY && (flagssss & DRM_MODE_ATOMIC_NONBLOCK) && (flagssss & DRM_MODE_PAGE_FLIP_EVENT) &&
+        !(flagssss & (DRM_MODE_ATOMIC_ALLOW_MODESET | DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_PAGE_FLIP_ASYNC));
+    if (ret && canRetryBlocking) {
+        flagssss &= ~DRM_MODE_ATOMIC_NONBLOCK;
+        backend->log(AQ_LOG_DEBUG, "atomic drm request: nonblocking page flip busy, retrying blocking");
+
+        ret   = drmModeAtomicCommit(backend->gpu->fd, req, flagssss, conn ? &conn->pendingPageFlip : nullptr);
+        error = ret == -1 ? errno : -ret;
+    }
+
+    if (ret) {
         backend->log((flagssss & DRM_MODE_ATOMIC_TEST_ONLY) ? AQ_LOG_DEBUG : AQ_LOG_ERROR,
-                     std::format("atomic drm request: failed to commit: {}, flags: {}", strerror(ret == -1 ? errno : -ret), flagsToStr(flagssss)));
+                     std::format("atomic drm request: failed to commit: {}, flags: {}", strerror(error), flagsToStr(flagssss)));
         return false;
     }
 
