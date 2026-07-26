@@ -626,8 +626,10 @@ bool Aquamarine::CDRMAtomicImpl::commit(Hyprutils::Memory::CSharedPointer<SDRMCo
             if (data.atomic.ctmd)
                 connector->crtc->atomic.ctmStateKnown = true;
 
-            if (data.mainFB && data.enabled && (flags & DRM_MODE_PAGE_FLIP_EVENT))
+            if (data.mainFB && data.enabled && (flags & DRM_MODE_PAGE_FLIP_EVENT)) {
+                connector->pendingPageFlip.async = flags & DRM_MODE_PAGE_FLIP_ASYNC;
                 connector->sched.onFrameSubmitted();
+            }
         }
     } else
         applied.rollback(data);

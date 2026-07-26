@@ -137,6 +137,7 @@ bool Aquamarine::CDRMLegacyImpl::commitInternal(Hyprutils::Memory::CSharedPointe
         return false;
     }
 
+    connector->pendingPageFlip.async = data.flags & DRM_MODE_PAGE_FLIP_ASYNC;
     connector->sched.onFrameSubmitted();
 
     return true;

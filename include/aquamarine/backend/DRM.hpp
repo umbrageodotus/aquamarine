@@ -255,6 +255,7 @@ namespace Aquamarine {
     struct SDRMPageFlip {
         Hyprutils::Memory::CWeakPointer<SDRMConnector> connector;
         uint64_t                                       presentationID = 0;
+        bool                                           async          = false;
 
         bool                                           zeroCopy() const;
         timespec                                       normalizeTimestamp(const timespec& timestamp, uint32_t& flags) const;

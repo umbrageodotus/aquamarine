@@ -1267,10 +1267,6 @@ static void handlePF(int fd, unsigned seq, unsigned tv_sec, unsigned tv_usec, un
     if (!pageFlip || !pageFlip->connector)
         return;
 
-    const uint64_t presentationID = std::exchange(pageFlip->presentationID, 0);
-
-    pageFlip->connector->sched.onFrameComplete();
-
     const auto& BACKEND = pageFlip->connector->backend;
 
     TRACE(BACKEND->log(AQ_LOG_TRACE, std::format("drm: pf event seq {} sec {} usec {} crtc {}", seq, tv_sec, tv_usec, crtc_id)));
@@ -1280,33 +1276,49 @@ static void handlePF(int fd, unsigned seq, unsigned tv_sec, unsigned tv_usec, un
         return;
     }
 
+    if (crtc_id && pageFlip->connector->crtc->id != crtc_id) {
+        BACKEND->log(AQ_LOG_DEBUG, std::format("drm: Ignoring a pf event from crtc {}, {} is on crtc {}", crtc_id, pageFlip->connector->szName, pageFlip->connector->crtc->id));
+        return;
+    }
+
+    if (!pageFlip->connector->sched.frameInFlight()) {
+        BACKEND->log(AQ_LOG_DEBUG, std::format("drm: Ignoring an unaccounted pf event on {}", pageFlip->connector->szName));
+        return;
+    }
+
+    const uint64_t presentationID = std::exchange(pageFlip->presentationID, 0);
+
+    pageFlip->connector->sched.onFrameComplete();
+
     // hold isFrameRunning around the emit (RAII pair, so reentrant enable/disable
     // can't strand it).
     CFrameRunningGuard frameRunning(pageFlip->connector->sched);
 
-    pageFlip->connector->onPresent();
+    if (!pageFlip->async) {
+        pageFlip->connector->onPresent();
 
-    uint32_t flags = IOutput::AQ_OUTPUT_PRESENT_VSYNC | IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK | IOutput::AQ_OUTPUT_PRESENT_HW_COMPLETION;
-    if (pageFlip->zeroCopy())
-        flags |= IOutput::AQ_OUTPUT_PRESENT_ZEROCOPY;
+        uint32_t flags = IOutput::AQ_OUTPUT_PRESENT_VSYNC | IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK | IOutput::AQ_OUTPUT_PRESENT_HW_COMPLETION;
+        if (pageFlip->zeroCopy())
+            flags |= IOutput::AQ_OUTPUT_PRESENT_ZEROCOPY;
 
-    timespec presented = {.tv_sec = (time_t)tv_sec, .tv_nsec = (long)(tv_usec * 1000)};
-    presented          = pageFlip->normalizeTimestamp(presented, flags);
+        timespec presented = {.tv_sec = (time_t)tv_sec, .tv_nsec = (long)(tv_usec * 1000)};
+        presented          = pageFlip->normalizeTimestamp(presented, flags);
 
-    // nvidia-drm registers no vblank counter, unless module options 'nvidia_drm vblank=1' is set.
-    // kernel checks for vblank support and fallbacks to setting seq 0 and the timestamp is a plain ktime_get()
-    // this is not a HW clock, its just a plain software clock fetched from whenever the event was called.
-    if (BACKEND->gpuDriver() == AQ_BACKEND_GPU_DRIVER_NVIDIA && seq == 0)
-        flags &= ~IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK;
+        // nvidia-drm registers no vblank counter, unless module options 'nvidia_drm vblank=1' is set.
+        // kernel checks for vblank support and fallbacks to setting seq 0 and the timestamp is a plain ktime_get()
+        // this is not a HW clock, its just a plain software clock fetched from whenever the event was called.
+        if (BACKEND->gpuDriver() == AQ_BACKEND_GPU_DRIVER_NVIDIA && seq == 0)
+            flags &= ~IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK;
 
-    pageFlip->connector->output->events.present.emit(IOutput::SPresentEvent{
-        .presented      = BACKEND->sessionActive(),
-        .when           = &presented,
-        .seq            = seq,
-        .refresh        = (int)(pageFlip->connector->refresh ? (1000000000000LL / pageFlip->connector->refresh) : 0),
-        .flags          = flags,
-        .presentationID = presentationID,
-    });
+        pageFlip->connector->output->events.present.emit(IOutput::SPresentEvent{
+            .presented      = BACKEND->sessionActive(),
+            .when           = &presented,
+            .seq            = seq,
+            .refresh        = (int)(pageFlip->connector->refresh ? (1000000000000LL / pageFlip->connector->refresh) : 0),
+            .flags          = flags,
+            .presentationID = presentationID,
+        });
+    }
 
     // Skip if an idle frame is already queued: it emits events.frame itself, and #325 forbids double-firing.
     if (BACKEND->sessionActive() && pageFlip->connector->output->enabledState && !pageFlip->connector->sched.frameScheduled())
