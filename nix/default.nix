@@ -14,6 +14,7 @@
   libgbm,
   pixman,
   pkg-config,
+  fetchFromGitLab,
   seatd,
   udev,
   wayland,
@@ -57,7 +58,20 @@ customStdenv.mkDerivation {
   buildInputs = [
     hwdata
     (hyprutils.override { inherit withMold; })
-    libdisplay-info
+    (libdisplay-info.overrideAttrs (
+      # Required because of 73ec53d8
+      finalAttrs: _: {
+        version = "cb5e3edcec6a3f653aab297976b0ebbf8ad5a0d5";
+
+        src = fetchFromGitLab {
+          domain = "gitlab.freedesktop.org";
+          owner = "emersion";
+          repo = "libdisplay-info";
+          rev = finalAttrs.version;
+          sha256 = "sha256-iTFeewIJKX6jT5/JrbqqmuvOwkGkP78gfcSnBvHRiso=";
+        };
+      }
+    ))
     libdrm
     libffi
     libGL
