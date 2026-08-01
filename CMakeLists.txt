@@ -165,6 +165,14 @@ add_test(
   COMMAND presentationClock)
 add_dependencies(tests presentationClock)
 
+add_executable(frameScheduler "tests/FrameScheduler.cpp")
+target_link_libraries(frameScheduler PRIVATE PkgConfig::deps aquamarine)
+add_test(
+  NAME "frameScheduler"
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests
+  COMMAND frameScheduler)
+add_dependencies(tests frameScheduler)
+
 # Installation
 install(TARGETS aquamarine)
 install(DIRECTORY "include/aquamarine" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})

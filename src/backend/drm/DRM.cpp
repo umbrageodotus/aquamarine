@@ -1290,39 +1290,44 @@ static void handlePF(int fd, unsigned seq, unsigned tv_sec, unsigned tv_usec, un
 
     pageFlip->connector->sched.onFrameComplete();
 
-    // hold isFrameRunning around the emit (RAII pair, so reentrant enable/disable
-    // can't strand it).
-    CFrameRunningGuard frameRunning(pageFlip->connector->sched);
+    {
+        // hold isFrameRunning around the emit (RAII pair, so reentrant enable/disable
+        // can't strand it).
+        CFrameRunningGuard frameRunning(pageFlip->connector->sched);
 
-    if (!pageFlip->async) {
-        pageFlip->connector->onPresent();
+        if (!pageFlip->async) {
+            pageFlip->connector->onPresent();
 
-        uint32_t flags = IOutput::AQ_OUTPUT_PRESENT_VSYNC | IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK | IOutput::AQ_OUTPUT_PRESENT_HW_COMPLETION;
-        if (pageFlip->zeroCopy())
-            flags |= IOutput::AQ_OUTPUT_PRESENT_ZEROCOPY;
+            uint32_t flags = IOutput::AQ_OUTPUT_PRESENT_VSYNC | IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK | IOutput::AQ_OUTPUT_PRESENT_HW_COMPLETION;
+            if (pageFlip->zeroCopy())
+                flags |= IOutput::AQ_OUTPUT_PRESENT_ZEROCOPY;
 
-        timespec presented = {.tv_sec = (time_t)tv_sec, .tv_nsec = (long)(tv_usec * 1000)};
-        presented          = pageFlip->normalizeTimestamp(presented, flags);
+            timespec presented = {.tv_sec = (time_t)tv_sec, .tv_nsec = (long)(tv_usec * 1000)};
+            presented          = pageFlip->normalizeTimestamp(presented, flags);
 
-        // nvidia-drm registers no vblank counter, unless module options 'nvidia_drm vblank=1' is set.
-        // kernel checks for vblank support and fallbacks to setting seq 0 and the timestamp is a plain ktime_get()
-        // this is not a HW clock, its just a plain software clock fetched from whenever the event was called.
-        if (BACKEND->gpuDriver() == AQ_BACKEND_GPU_DRIVER_NVIDIA && seq == 0)
-            flags &= ~IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK;
+            // nvidia-drm registers no vblank counter, unless module options 'nvidia_drm vblank=1' is set.
+            // kernel checks for vblank support and fallbacks to setting seq 0 and the timestamp is a plain ktime_get()
+            // this is not a HW clock, its just a plain software clock fetched from whenever the event was called.
+            if (BACKEND->gpuDriver() == AQ_BACKEND_GPU_DRIVER_NVIDIA && seq == 0)
+                flags &= ~IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK;
 
-        pageFlip->connector->output->events.present.emit(IOutput::SPresentEvent{
-            .presented      = BACKEND->sessionActive(),
-            .when           = &presented,
-            .seq            = seq,
-            .refresh        = (int)(pageFlip->connector->refresh ? (1000000000000LL / pageFlip->connector->refresh) : 0),
-            .flags          = flags,
-            .presentationID = presentationID,
-        });
+            pageFlip->connector->output->events.present.emit(IOutput::SPresentEvent{
+                .presented      = BACKEND->sessionActive(),
+                .when           = &presented,
+                .seq            = seq,
+                .refresh        = (int)(pageFlip->connector->refresh ? (1000000000000LL / pageFlip->connector->refresh) : 0),
+                .flags          = flags,
+                .presentationID = presentationID,
+            });
+        }
+
+        // Skip if an idle frame is already queued: it emits events.frame itself, and #325 forbids double-firing.
+        if (BACKEND->sessionActive() && pageFlip->connector->output->enabledState && !pageFlip->connector->sched.frameScheduled())
+            pageFlip->connector->sched.frameReady.emit();
     }
 
-    // Skip if an idle frame is already queued: it emits events.frame itself, and #325 forbids double-firing.
-    if (BACKEND->sessionActive() && pageFlip->connector->output->enabledState && !pageFlip->connector->sched.frameScheduled())
-        pageFlip->connector->sched.frameReady.emit();
+    if (pageFlip->connector->sched.takeDeferredSchedule() && pageFlip->connector->sched.canSchedule())
+        pageFlip->connector->output->scheduleFrame(IOutput::AQ_SCHEDULE_RENDER_MONITOR);
 }
 
 bool Aquamarine::CDRMBackend::dispatchEvents() {
@@ -2489,9 +2494,8 @@ void Aquamarine::CDRMOutput::scheduleFrame(const scheduleFrameReason reason) {
     if (!enabledState)
         return;
 
-    // a scheduleFrame mid frame, reschedule one more.
     if (connector->sched.frameRunning()) {
-        connector->sched.requestReschedule();
+        connector->sched.deferSchedule();
         return;
     }
 
@@ -2509,8 +2513,13 @@ void Aquamarine::CDRMOutput::scheduleFrame(const scheduleFrameReason reason) {
             if (connector->sched.frameInFlight() || connector->sched.frameRunning())
                 return;
 
-            CFrameRunningGuard frameRunning(connector->sched);
-            connector->sched.frameReady.emit();
+            {
+                CFrameRunningGuard frameRunning(connector->sched);
+                connector->sched.frameReady.emit();
+            }
+
+            if (connector->sched.takeDeferredSchedule() && connector->sched.canSchedule())
+                scheduleFrame(AQ_SCHEDULE_RENDER_MONITOR);
 
             // above frame scheduled, and then committed, remove the idle frame. the pageflip will emit the frame.
             if (backend_ && backend_->backend && connector->sched.frameScheduled() && connector->sched.frameInFlight()) {
@@ -2593,9 +2602,6 @@ Aquamarine::CDRMOutput::CDRMOutput(const std::string& name_, Hyprutils::Memory::
 
     // The scheduler's frameReady signal drives the public events.frame on this output.
     frameReadyListener = connector->sched.frameReady.listen([this]() { events.frame.emit(); });
-
-    // scheduled from inside a running frame, schedule it once the running frame is done.
-    rescheduleListener = connector->sched.rescheduleNeeded.listen([this]() { scheduleFrame(AQ_SCHEDULE_NEEDS_FRAME); });
 }
 
 SP<CDRMFB> Aquamarine::CDRMFB::create(SP<IBuffer> buffer_, Hyprutils::Memory::CWeakPointer<CDRMBackend> backend_, bool* isNew) {

@@ -496,9 +496,6 @@ Aquamarine::CWaylandOutput::CWaylandOutput(const std::string& name_, Hyprutils::
     // The scheduler's frameReady signal drives the public events.frame on this output.
     frameReadyListener = sched.frameReady.listen([this]() { events.frame.emit(); });
 
-    // a scheduleFrame mid frame, reschedule one more.
-    rescheduleListener = sched.rescheduleNeeded.listen([this]() { scheduleFrame(AQ_SCHEDULE_NEEDS_FRAME); });
-
     // Idle that emits the scheduled frame, fired via the core backend's idle queue
     // (addIdleEvent), which the consumer's event loop pumps every iteration. Deliberately
     // not the backend-local idleCallbacks vector: that only drains inside dispatchEvents,
@@ -742,11 +739,16 @@ void Aquamarine::CWaylandOutput::onFrameDone() {
     waylandState.frameCallback.reset();
     sched.onFrameComplete();
 
-    CFrameRunningGuard frameRunning(sched);
+    {
+        CFrameRunningGuard frameRunning(sched);
 
-    events.present.emit(IOutput::SPresentEvent{.presented = true, .presentationID = std::exchange(pendingPresentationID, 0)});
+        events.present.emit(IOutput::SPresentEvent{.presented = true, .presentationID = std::exchange(pendingPresentationID, 0)});
 
-    sched.frameReady.emit();
+        sched.frameReady.emit();
+    }
+
+    if (sched.takeDeferredSchedule() && sched.canSchedule())
+        scheduleFrame(AQ_SCHEDULE_RENDER_MONITOR);
 }
 
 bool Aquamarine::CWaylandOutput::setCursor(Hyprutils::Memory::CSharedPointer<IBuffer> buffer, const Hyprutils::Math::Vector2D& hotspot) {
@@ -854,9 +856,8 @@ void Aquamarine::CWaylandOutput::scheduleFrame(const scheduleFrameReason reason)
                                 std::format("CWaylandOutput::scheduleFrame: reason {}, needsFrame {}, canSchedule {}", (uint32_t)reason, needsFrame, sched.canSchedule())));
     needsFrame = true;
 
-    // scheduled from inside a running frame, schedule it once the running frame is done.
     if (sched.frameRunning()) {
-        sched.requestReschedule();
+        sched.deferSchedule();
         return;
     }
 
